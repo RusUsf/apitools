@@ -133,8 +133,8 @@ function New-ApiToolsCrudApi {
         }
         if ($params.ContainsKey('User Id') -or $params.ContainsKey('Username') -or $params.ContainsKey('Uid')) {
             $uid = if ($params.ContainsKey('User Id')) { $params['User Id'] } 
-            elseif ($params.ContainsKey('Username')) { $params['Username'] }
-            else { $params['Uid'] }
+                   elseif ($params.ContainsKey('Username')) { $params['Username'] }
+                   else { $params['Uid'] }
             $odbcParts += "Uid=$uid"
         }
         if ($params.ContainsKey('Password') -or $params.ContainsKey('Pwd')) {
@@ -332,23 +332,27 @@ function New-ApiToolsCrudApi {
     # =========================================================================
     if ($DryRun) {
         $plan = [pscustomobject]@{
-            Action      = 'CreateCrudApi'
-            Engine      = $engine
-            Database    = $DatabaseName
-            ProjectName = $finalProjectName
-            ProjectPath = $projectFullPath
-            Provider    = $providerPackage
-            Steps       = @(
+            Action       = 'CreateCrudApi'
+            Engine       = $engine
+            Database     = $DatabaseName
+            ProjectName  = $finalProjectName
+            ProjectPath  = $projectFullPath
+            Provider     = $providerPackage
+            Steps        = @(
                 "1. Create Web API project: dotnet new webapi -n $finalProjectName"
-                "2. Install EF package: dotnet add package $providerPackage"
-                "3. Install design package: dotnet add package Microsoft.EntityFrameworkCore.Design"
-                "4. Install codegen package: dotnet add package Microsoft.VisualStudio.Web.CodeGeneration.Design"
-                "5. Scaffold DbContext and models: dotnet ef dbcontext scaffold"
-                "6. Generate CRUD controllers for each model"
-                "7. Configure Program.cs with DbContext and Swagger"
-                "8. Configure appsettings.json with connection string"
+                "2. Install base EF package: dotnet add package Microsoft.EntityFrameworkCore"
+                "3. Install EF design package: dotnet add package Microsoft.EntityFrameworkCore.Design"
+                "4. Install EF tools package: dotnet add package Microsoft.EntityFrameworkCore.Tools"
+                "5. Install provider package: dotnet add package $providerPackage"
+                "6. Install codegen package: dotnet add package Microsoft.VisualStudio.Web.CodeGeneration.Design"
+                "7. Install Swagger package: dotnet add package Swashbuckle.AspNetCore"
+                "8. Scaffold DbContext and models: dotnet ef dbcontext scaffold"
+                "9. Build project: dotnet build"
+                "10. Generate CRUD controllers for each model"
+                "11. Configure Program.cs with DbContext and Swagger"
+                "12. Configure appsettings.json with connection string"
             )
-            WillCreate  = $true
+            WillCreate   = $true
         }
         
         Write-Host ""
@@ -372,6 +376,10 @@ function New-ApiToolsCrudApi {
     # =========================================================================
     if ($PSCmdlet.ShouldProcess("$engine::$DatabaseName", "Create CRUD Web API project")) {
 
+        # Initialize progress tracking
+        $totalSteps = 7
+        $currentStep = 0
+
         # Remove existing directory if Force is specified
         if ($Force -and (Test-Path $projectFullPath)) {
             Write-Verbose "Removing existing project directory..."
@@ -379,9 +387,12 @@ function New-ApiToolsCrudApi {
         }
 
         # Create project
+        $currentStep++
+        Write-Progress -Activity "Creating CRUD API Project" -Status "Creating Web API project..." -PercentComplete (($currentStep / $totalSteps) * 100)
         Write-Verbose "Creating Web API project..."
         $createResult = & dotnet new webapi -n $finalProjectName -o $projectFullPath 2>&1
         if ($LASTEXITCODE -ne 0) {
+            Write-Progress -Activity "Creating CRUD API Project" -Completed
             throw "Failed to create Web API project: $createResult"
         }
         Write-Verbose "✓ Web API project created"
@@ -392,15 +403,24 @@ function New-ApiToolsCrudApi {
             # =========================================================================
             # STEP 8: INSTALL REQUIRED NUGET PACKAGES
             # =========================================================================
+            $currentStep++
+            Write-Progress -Activity "Creating CRUD API Project" -Status "Installing NuGet packages..." -PercentComplete (($currentStep / $totalSteps) * 100)
             Write-Verbose "Installing NuGet packages..."
 
             $packages = @(
-                $providerPackage,
+                'Microsoft.EntityFrameworkCore',
                 'Microsoft.EntityFrameworkCore.Design',
-                'Microsoft.VisualStudio.Web.CodeGeneration.Design'
+                'Microsoft.EntityFrameworkCore.Tools',
+                $providerPackage,
+                'Microsoft.VisualStudio.Web.CodeGeneration.Design',
+                'Swashbuckle.AspNetCore'
             )
 
+            $packageCount = 0
             foreach ($package in $packages) {
+                $packageCount++
+                $packageStatus = "Installing package $packageCount of $($packages.Count): $package"
+                Write-Progress -Activity "Creating CRUD API Project" -Status $packageStatus -PercentComplete (($currentStep / $totalSteps) * 100) -CurrentOperation $package
                 Write-Verbose "Installing $package..."
                 $installResult = & dotnet add package $package 2>&1
                 if ($LASTEXITCODE -ne 0) {
@@ -412,6 +432,8 @@ function New-ApiToolsCrudApi {
             # =========================================================================
             # STEP 9: SCAFFOLD DBCONTEXT AND MODELS
             # =========================================================================
+            $currentStep++
+            Write-Progress -Activity "Creating CRUD API Project" -Status "Scaffolding DbContext and models from database..." -PercentComplete (($currentStep / $totalSteps) * 100)
             Write-Verbose "Scaffolding DbContext and models from database..."
 
             $dbContextName = "$($DatabaseName)Context"
@@ -427,26 +449,47 @@ function New-ApiToolsCrudApi {
 
             $scaffoldResult = & dotnet ef @scaffoldArgs 2>&1
             if ($LASTEXITCODE -ne 0) {
+                Write-Progress -Activity "Creating CRUD API Project" -Completed
                 throw "Failed to scaffold DbContext: $scaffoldResult"
             }
             Write-Verbose "✓ DbContext and models scaffolded"
 
             # Get list of generated model files
             $modelFiles = Get-ChildItem -Path "Models" -Filter "*.cs" -File | 
-            Where-Object { $_.Name -ne "$dbContextName.cs" }
+                Where-Object { $_.Name -ne "$dbContextName.cs" }
             
             $modelsGenerated = $modelFiles.Count
             Write-Verbose "Generated $modelsGenerated model(s)"
 
             # =========================================================================
-            # STEP 10: GENERATE CRUD CONTROLLERS
+            # STEP 10: BUILD PROJECT (Required before controller generation)
             # =========================================================================
+            $currentStep++
+            Write-Progress -Activity "Creating CRUD API Project" -Status "Building project..." -PercentComplete (($currentStep / $totalSteps) * 100)
+            Write-Verbose "Building project before controller generation..."
+            
+            $buildResult = & dotnet build 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Write-Progress -Activity "Creating CRUD API Project" -Completed
+                throw "Failed to build project before controller generation: $buildResult"
+            }
+            Write-Verbose "✓ Project built successfully"
+
+            # =========================================================================
+            # STEP 11: GENERATE CRUD CONTROLLERS
+            # =========================================================================
+            $currentStep++
+            Write-Progress -Activity "Creating CRUD API Project" -Status "Generating CRUD controllers..." -PercentComplete (($currentStep / $totalSteps) * 100)
             Write-Verbose "Generating CRUD controllers..."
 
             $controllersGenerated = 0
+            $controllerCount = 0
             foreach ($modelFile in $modelFiles) {
+                $controllerCount++
                 $modelName = [System.IO.Path]::GetFileNameWithoutExtension($modelFile.Name)
                 
+                $controllerStatus = "Generating controller $controllerCount of $($modelFiles.Count): $modelName"
+                Write-Progress -Activity "Creating CRUD API Project" -Status $controllerStatus -PercentComplete (($currentStep / $totalSteps) * 100) -CurrentOperation "$modelName`Controller"
                 Write-Verbose "Generating controller for $modelName..."
                 
                 $controllerArgs = @(
@@ -454,8 +497,8 @@ function New-ApiToolsCrudApi {
                     '-name', "$($modelName)Controller",
                     '-async',
                     '-api',
-                    '-m', "Models.$modelName",
-                    '-dc', "Models.$dbContextName",
+                    '-m', $modelName,
+                    '-dc', $dbContextName,
                     '-outDir', 'Controllers'
                 )
 
@@ -470,8 +513,10 @@ function New-ApiToolsCrudApi {
             }
 
             # =========================================================================
-            # STEP 11: CONFIGURE PROGRAM.CS
+            # STEP 12: CONFIGURE PROGRAM.CS
             # =========================================================================
+            $currentStep++
+            Write-Progress -Activity "Creating CRUD API Project" -Status "Configuring Program.cs..." -PercentComplete (($currentStep / $totalSteps) * 100)
             Write-Verbose "Configuring Program.cs..."
 
             $dbContextMethod = if ($engine -eq 'SqlServer') { 'UseSqlServer' } else { 'UseNpgsql' }
@@ -511,8 +556,10 @@ app.Run();
             Write-Verbose "✓ Program.cs configured"
 
             # =========================================================================
-            # STEP 12: CONFIGURE APPSETTINGS.JSON
+            # STEP 13: CONFIGURE APPSETTINGS.JSON
             # =========================================================================
+            $currentStep++
+            Write-Progress -Activity "Creating CRUD API Project" -Status "Configuring appsettings.json..." -PercentComplete (($currentStep / $totalSteps) * 100)
             Write-Verbose "Configuring appsettings.json..."
 
             # Escape backslashes for JSON
@@ -536,8 +583,13 @@ app.Run();
             Set-Content -Path "appsettings.json" -Value $appsettingsContent -Encoding UTF8
             Write-Verbose "✓ appsettings.json configured"
 
+            # Complete progress bar
+            Write-Progress -Activity "Creating CRUD API Project" -Status "Completed!" -PercentComplete 100
+            Start-Sleep -Milliseconds 500
+            Write-Progress -Activity "Creating CRUD API Project" -Completed
+
             # =========================================================================
-            # STEP 13: RETURN SUCCESS SUMMARY
+            # STEP 14: RETURN SUCCESS SUMMARY
             # =========================================================================
             Write-Host ""
             Write-Host "✓ CRUD API project created successfully!" -ForegroundColor Green
@@ -551,7 +603,11 @@ app.Run();
             Write-Host "  cd `"$projectFullPath`"" -ForegroundColor Gray
             Write-Host "  dotnet run" -ForegroundColor Gray
             Write-Host ""
-            Write-Host "Swagger UI will be available at: https://localhost:7xxx/swagger" -ForegroundColor Cyan
+            Write-Host "Access your API at:" -ForegroundColor Cyan
+            Write-Host "  http://localhost:5xxx/swagger (check console output for exact port)" -ForegroundColor Gray
+            Write-Host "  https://localhost:7xxx/swagger (if HTTPS is configured)" -ForegroundColor Gray
+            Write-Host ""
+            Write-Host "Note: To enable HTTPS, run: dotnet dev-certs https --trust" -ForegroundColor Yellow
             Write-Host ""
 
             return [pscustomobject]@{
@@ -569,4 +625,4 @@ app.Run();
             Pop-Location
         }
     }
-}   
+}
