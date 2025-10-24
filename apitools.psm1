@@ -8,7 +8,8 @@ if (Test-Path $public) {
 
 Export-ModuleMember -Function @(
     'New-ApiToolsHospitalDb',
-    'New-ApiToolsCrudApi'
+    'New-ApiToolsCrudApi',
+    'New-ApiToolsDbFromModels'
     # 'New-ApiToolsRetailDb',
     # 'New-ApiToolsSchoolDb'
 )
