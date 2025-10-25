@@ -224,8 +224,56 @@ function New-ApiToolsDbFromModels {
             throw "Missing Entity Framework provider package. Install SqlServer provider with: dotnet add package Microsoft.EntityFrameworkCore.SqlServer OR PostgreSQL provider with: dotnet add package Npgsql.EntityFrameworkCore.PostgreSQL"
         }
 
-        # Determine project provider from installed packages
-        $projectProvider = if ($hasSqlServerProvider) { 'SqlServer' } else { 'PostgreSQL' }
+        # Determine project provider from installed packages with smart detection
+        # Note: SQL Server package may exist as a transitive dependency even for PostgreSQL projects
+        # (aspnet-codegenerator tooling bug workaround). Check DbContext code to determine actual provider.
+        
+        $projectProvider = $null
+        
+        # First, try to detect the actual provider from DbContext configuration
+        $dbContextFiles = Get-ChildItem -Path "." -Filter "*Context.cs" -Recurse
+        $usesNpgsql = $false
+        $usesSqlServer = $false
+        
+        foreach ($contextFile in $dbContextFiles) {
+            $contextContent = Get-Content -Path $contextFile.FullName -Raw -ErrorAction SilentlyContinue
+            if ($contextContent) {
+                # Check for actual provider usage in code
+                if ($contextContent -match 'UseNpgsql|Npgsql\.EntityFrameworkCore') {
+                    $usesNpgsql = $true
+                }
+                if ($contextContent -match 'UseSqlServer(?!.*UseNpgsql)') {
+                    $usesSqlServer = $true
+                }
+            }
+        }
+        
+        # Determine provider based on actual usage in DbContext
+        if ($usesNpgsql -and -not $usesSqlServer) {
+            $projectProvider = 'PostgreSQL'
+            Write-Verbose "✓ Detected PostgreSQL provider from DbContext configuration"
+        }
+        elseif ($usesSqlServer -and -not $usesNpgsql) {
+            $projectProvider = 'SqlServer'
+            Write-Verbose "✓ Detected SQL Server provider from DbContext configuration"
+        }
+        # Fallback: Check package references, but prioritize PostgreSQL if both exist
+        elseif ($hasPostgreSqlProvider -and $hasSqlServerProvider) {
+            $projectProvider = 'PostgreSQL'
+            Write-Verbose "⚠ Both providers found in packages. SQL Server likely a transitive dependency. Using PostgreSQL."
+        }
+        elseif ($hasPostgreSqlProvider) {
+            $projectProvider = 'PostgreSQL'
+            Write-Verbose "✓ Using PostgreSQL provider from package reference"
+        }
+        elseif ($hasSqlServerProvider) {
+            $projectProvider = 'SqlServer'
+            Write-Verbose "✓ Using SQL Server provider from package reference"
+        }
+        else {
+            throw "Unable to determine database provider. Neither SQL Server nor PostgreSQL provider detected."
+        }
+        
         Write-Verbose "✓ Entity Framework packages found (Provider: $projectProvider)"
 
         # =========================================================================
