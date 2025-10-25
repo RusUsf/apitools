@@ -55,6 +55,10 @@ A PSCustomObject summary with Action, Engine, Database, ProjectName, ProjectPath
 Author: Your Name
 Module: apitools
 This command requires .NET CLI with dotnet-ef and dotnet-aspnet-codegenerator global tools installed. The function validates these prerequisites before execution. PostgreSQL ODBC driver discovery is automatic.
+
+.CHANGELOG
+v1.1 - Fixed PostgreSQL scaffolding issue by replacing array splatting with direct argument passing
+v1.2 - Fixed PostgreSQL controller generation by adding Microsoft.EntityFrameworkCore.SqlServer package requirement (aspnet-codegenerator bug workaround)
 #>
 
 function New-ApiToolsCrudApi {
@@ -415,6 +419,16 @@ function New-ApiToolsCrudApi {
                 'Microsoft.VisualStudio.Web.CodeGeneration.Design',
                 'Swashbuckle.AspNetCore'
             )
+            
+            # CRITICAL FIX: aspnet-codegenerator has a hardcoded dependency on SQL Server package
+            # even when using PostgreSQL. This is a known bug/limitation in the code generator tool.
+            # The generator checks for Microsoft.EntityFrameworkCore.SqlServer during reflection
+            # and fails silently (with exit code 0) if it's not found, even for non-SQL Server databases.
+            # We must install this package for controller generation to work with PostgreSQL.
+            if ($engine -eq 'PostgreSQL') {
+                $packages += 'Microsoft.EntityFrameworkCore.SqlServer'
+                Write-Verbose "Adding SQL Server package (required by aspnet-codegenerator even for PostgreSQL projects)"
+            }
 
             $packageCount = 0
             foreach ($package in $packages) {
@@ -430,24 +444,26 @@ function New-ApiToolsCrudApi {
             Write-Verbose "✓ NuGet packages installed"
 
             # =========================================================================
-            # STEP 9: SCAFFOLD DBCONTEXT AND MODELS
+            # STEP 9: SCAFFOLD DBCONTEXT AND MODELS (FIXED - Direct argument passing)
             # =========================================================================
             $currentStep++
             Write-Progress -Activity "Creating CRUD API Project" -Status "Scaffolding DbContext and models from database..." -PercentComplete (($currentStep / $totalSteps) * 100)
             Write-Verbose "Scaffolding DbContext and models from database..."
 
             $dbContextName = "$($DatabaseName)Context"
-            $scaffoldArgs = @(
-                'dbcontext',
-                'scaffold',
-                "`"$ConnectionString`"",
-                $scaffoldProvider,
-                '--output-dir', 'Models',
-                '--context', $dbContextName,
-                '--force'
-            )
-
-            $scaffoldResult = & dotnet ef @scaffoldArgs 2>&1
+            
+            # FIX: Use direct argument passing instead of array splatting (@)
+            # This preserves proper quoting of the connection string when passed to dotnet ef
+            # Previously, array expansion would lose the connection string quoting, causing
+            # Npgsql to fail parsing. Direct argument passing with line continuation (`) 
+            # maintains proper shell-level quoting throughout the invocation.
+            $scaffoldResult = & dotnet ef dbcontext scaffold `
+                "$ConnectionString" `
+                $scaffoldProvider `
+                --output-dir Models `
+                --context $dbContextName `
+                --force 2>&1
+            
             if ($LASTEXITCODE -ne 0) {
                 Write-Progress -Activity "Creating CRUD API Project" -Completed
                 throw "Failed to scaffold DbContext: $scaffoldResult"
@@ -482,8 +498,18 @@ function New-ApiToolsCrudApi {
             Write-Progress -Activity "Creating CRUD API Project" -Status "Generating CRUD controllers..." -PercentComplete (($currentStep / $totalSteps) * 100)
             Write-Verbose "Generating CRUD controllers..."
 
+            # Ensure Controllers folder exists
+            $controllersPath = Join-Path (Get-Location) "Controllers"
+            if (-not (Test-Path $controllersPath)) {
+                New-Item -ItemType Directory -Path $controllersPath -Force | Out-Null
+                Write-Verbose "✓ Created Controllers folder: $controllersPath"
+            }
+
             $controllersGenerated = 0
+            $controllersSkipped = 0
+            $controllerFailures = @()
             $controllerCount = 0
+            
             foreach ($modelFile in $modelFiles) {
                 $controllerCount++
                 $modelName = [System.IO.Path]::GetFileNameWithoutExtension($modelFile.Name)
@@ -492,24 +518,74 @@ function New-ApiToolsCrudApi {
                 Write-Progress -Activity "Creating CRUD API Project" -Status $controllerStatus -PercentComplete (($currentStep / $totalSteps) * 100) -CurrentOperation "$modelName`Controller"
                 Write-Verbose "Generating controller for $modelName..."
                 
-                $controllerArgs = @(
-                    'controller',
-                    '-name', "$($modelName)Controller",
-                    '-async',
-                    '-api',
-                    '-m', $modelName,
-                    '-dc', $dbContextName,
-                    '-outDir', 'Controllers'
-                )
-
-                $controllerResult = & dotnet aspnet-codegenerator @controllerArgs 2>&1
+                # Build fully qualified type names (required for proper type resolution)
+                $modelNamespace = "$finalProjectName.Models.$modelName"
+                $contextNamespace = "$finalProjectName.Models.$dbContextName"
+                
+                # Generate controller with fully qualified names and absolute path
+                $controllerResult = & dotnet aspnet-codegenerator controller `
+                    -name "$($modelName)Controller" `
+                    -async `
+                    -api `
+                    -m $modelNamespace `
+                    -dc $contextNamespace `
+                    -outDir $controllersPath `
+                    -f 2>&1
+                
+                $resultString = $controllerResult | Out-String
+                    
                 if ($LASTEXITCODE -eq 0) {
-                    $controllersGenerated++
-                    Write-Verbose "✓ Controller generated for $modelName"
+                    # Verify the file was actually created (aspnet-codegenerator sometimes reports success incorrectly)
+                    $controllerFile = Join-Path $controllersPath "$($modelName)Controller.cs"
+                    if (Test-Path $controllerFile) {
+                        $controllersGenerated++
+                        Write-Verbose "✓ Controller generated and verified: $($modelName)Controller.cs"
+                    }
+                    else {
+                        $errorMsg = "Controller generation reported success but file not found. This may indicate missing EF provider packages."
+                        $controllerFailures += [PSCustomObject]@{
+                            Model = $modelName
+                            Error = $errorMsg
+                            Reason = "FileNotCreated"
+                        }
+                        Write-Verbose "⚠ $errorMsg Model: $modelName"
+                    }
                 }
                 else {
-                    Write-Warning "Failed to generate controller for $modelName : $controllerResult"
+                    # Check if this is a "Primary key not found" error - these models should be skipped
+                    if ($resultString -match "Primary key not found") {
+                        $controllersSkipped++
+                        Write-Verbose "⊘ Skipped $modelName (no detectable primary key - common with composite keys or ASP.NET Identity tables)"
+                    }
+                    else {
+                        # Real error - record it
+                        $controllerFailures += [PSCustomObject]@{
+                            Model = $modelName
+                            Error = $resultString.Trim()
+                            Reason = "GenerationError"
+                        }
+                        Write-Verbose "⚠ Failed to generate controller for $modelName : $resultString"
+                    }
                 }
+            }
+
+            # Show summary of controller generation
+            if ($controllersSkipped -gt 0) {
+                Write-Verbose "Skipped $controllersSkipped model(s) without detectable primary keys (ASP.NET Identity tables, composite keys, etc.)"
+            }
+            
+            if ($controllerFailures.Count -gt 0) {
+                Write-Host ""
+                Write-Host "WARNING: $($controllerFailures.Count) controller(s) could not be generated:" -ForegroundColor Yellow
+                foreach ($failure in $controllerFailures) {
+                    if ($failure.Reason -eq "GenerationError") {
+                        Write-Host "  ✗ $($failure.Model)" -ForegroundColor Yellow
+                    }
+                }
+                Write-Host ""
+                Write-Host "Note: Models with composite keys or no detectable primary key were automatically skipped." -ForegroundColor Cyan
+                Write-Host "Controllers folder: $controllersPath" -ForegroundColor Cyan
+                Write-Host ""
             }
 
             # =========================================================================
@@ -534,7 +610,11 @@ builder.Services.AddDbContext<$dbContextName>(options =>
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(options =>
+{
+    // Resolve conflicts when multiple operations have the same HTTP method and path
+    options.ResolveConflictingActions(apiDescriptions => apiDescriptions.First());
+});
 
 var app = builder.Build();
 
@@ -592,12 +672,26 @@ app.Run();
             # STEP 14: RETURN SUCCESS SUMMARY
             # =========================================================================
             Write-Host ""
-            Write-Host "✓ CRUD API project created successfully!" -ForegroundColor Green
+            if ($controllersGenerated -eq $modelsGenerated) {
+                Write-Host "✓ CRUD API project created successfully!" -ForegroundColor Green
+            }
+            else {
+                Write-Host "⚠ CRUD API project created with some controllers skipped" -ForegroundColor Yellow
+            }
             Write-Host ""
             Write-Host "Project: $finalProjectName" -ForegroundColor White
             Write-Host "Location: $projectFullPath" -ForegroundColor White
             Write-Host "Models: $modelsGenerated" -ForegroundColor White
-            Write-Host "Controllers: $controllersGenerated" -ForegroundColor White
+            Write-Host "Controllers: $controllersGenerated" -ForegroundColor $(if ($controllersGenerated -eq $modelsGenerated) { 'White' } else { 'Yellow' })
+            
+            if ($controllersSkipped -gt 0) {
+                Write-Host "Skipped: $controllersSkipped (models without detectable primary keys)" -ForegroundColor Gray
+            }
+            
+            if ($controllerFailures.Count -gt 0) {
+                Write-Host "Failures: $($controllerFailures.Count)" -ForegroundColor Red
+            }
+            
             Write-Host ""
             Write-Host "To run the API:" -ForegroundColor Cyan
             Write-Host "  cd `"$projectFullPath`"" -ForegroundColor Gray
@@ -607,6 +701,13 @@ app.Run();
             Write-Host "  http://localhost:5xxx/swagger (check console output for exact port)" -ForegroundColor Gray
             Write-Host "  https://localhost:7xxx/swagger (if HTTPS is configured)" -ForegroundColor Gray
             Write-Host ""
+            
+            if ($controllersSkipped -gt 0) {
+                Write-Host "Note: Some models (like ASP.NET Identity tables) were skipped due to composite keys." -ForegroundColor Yellow
+                Write-Host "      These can be added manually if needed." -ForegroundColor Yellow
+                Write-Host ""
+            }
+            
             Write-Host "Note: To enable HTTPS, run: dotnet dev-certs https --trust" -ForegroundColor Yellow
             Write-Host ""
 
@@ -618,6 +719,8 @@ app.Run();
                 ProjectPath          = $projectFullPath
                 ModelsGenerated      = $modelsGenerated
                 ControllersGenerated = $controllersGenerated
+                ControllersSkipped   = $controllersSkipped
+                ControllerFailures   = $controllerFailures.Count
                 Created              = $true
             }
         }
