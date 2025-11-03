@@ -12,7 +12,7 @@
 RootModule = 'apitools.psm1'
 
 # Version number of this module.
-ModuleVersion = '1.0.3'
+ModuleVersion = '1.0.4'
 
 # Supported PSEditions
 CompatiblePSEditions = @('Desktop', 'Core')
@@ -56,7 +56,8 @@ PowerShellVersion = '7.0'
 FunctionsToExport = @(
     'New-ApiToolsHospitalDb',
     'New-ApiToolsCrudApi',
-    'New-ApiToolsDbFromModels'
+    'New-ApiToolsDbFromModels',
+    'Update-ApiToolsFromDatabase'
 )
 
 # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
