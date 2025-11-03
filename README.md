@@ -1,7 +1,3 @@
-Yes — that version is **99% perfect** for GitHub and PowerShell Gallery, just needs one small cleanup:
-You accidentally left the opening and closing fences mismatched at the top (` ````markdown ` vs closing ```).
-Here’s the **fixed, final version** you can copy-paste directly into your README.md — it renders flawlessly on GitHub, PSGallery, and npm-style viewers:
-
 ````markdown
 # apitools PowerShell Module
 
