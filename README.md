@@ -173,11 +173,4 @@ Bringing the dbatools spirit to API development — powerful, transparent, and d
 
 ```
 
-✅ **Verified:**  
-- Works perfectly in GitHub Markdown preview  
-- All code blocks are valid fenced sections  
-- Tables and emoji align correctly  
-- No nested code block parsing errors  
 
-This version is absolutely ready to commit as your `README.md` — clean, readable, and gallery-friendly.
-```
