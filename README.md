@@ -170,7 +170,3 @@ MIT License — see `LICENSE`.
 
 **Made with ❤️ by Ruslan Dubas**
 Bringing the dbatools spirit to API development — powerful, transparent, and dependency-free.
-
-```
-
-
