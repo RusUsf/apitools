@@ -110,7 +110,7 @@ PrivateData = @{
         ProjectUri = 'https://github.com/RusUsf/apitools'
 
         # A URL to an icon representing this module.
-        # IconUri = ''
+        IconUri = 'https://ruslandubas.com/apitools-logo.png'
 
         # ReleaseNotes of this module
         ReleaseNotes = @'
